@@ -1,4 +1,5 @@
 /*
+/*
  * This software is in the public domain under CC0 1.0 Universal plus a
  * Grant of Patent License.
  *
@@ -250,6 +251,7 @@ task gitStatusAll {
             logger.lifecycle("\nGit status for ${gitDir} (branch:${curGrgit.branch.current()?.name}, tracking:${curGrgit.branch.current()?.trackingBranch?.name})")
 
             if (curGrgit.remote.list().find({ it.name == 'upstream'})) {
+                curGrgit.fetch([remote: "upstream"])
                 def upstreamAhead = curGrgit.log { range curGrgit.resolve.toCommit('refs/remotes/upstream/master'), curGrgit.resolve.toCommit('refs/remotes/origin/master') }
                 if (upstreamAhead) logger.lifecycle("- origin/master ${upstreamAhead.size()} commits ahead of upstream/master")
             }
@@ -431,6 +433,71 @@ task gitMergeAll {
             if (pushMerge) {
                 grgit.push();
                 logger.lifecycle("    Pushing merge")
+            }
+        }
+    }
+}
+
+task gitSetUpstreamToAddons {
+    description "Sets the upstreams for all components to the value in the addons.xml.  The assumption is the addons.xml is consistent with open source and the project uses myaddons.xml"
+    doLast {
+        Node addons = parseAddons()
+
+        List<String> gitDirectories = []
+        if (file(".git").exists()) {
+            // handle the framework
+            def compDir = "."
+            def curGrgit = Grgit.open(dir: compDir)
+            def upstream = curGrgit.remote.list().find({ it.name == "upstream"})
+            if (upstream == null) {
+                def url = "https://github.com/moqui/moqui-framework.git"
+                curGrgit.remote.add([name: "upstream", url: url])
+                logger.lifecycle("\n No current upstream set. Setting to ${url}")
+            } else {
+                logger.lifecycle("\n moqui-framework: Remote set to ${upstream.url}")
+            }
+        }
+
+        if (file("runtime/.git").exists()) {
+            if( (Node) addons.runtime[0] != null) {
+                def compDir = "runtime"
+                def curGrgit = Grgit.open(dir: compDir)
+                def upstream = curGrgit.remote.list().find({ it.name == "upstream"})
+                if (upstream == null && url != null) {
+                    def url = getComponentUpstreamLocation("git", addons.runtime[0], addons)
+                    logger.lifecycle("\n ${url}")
+                    if (url != null) {
+                        curGrgit.remote.add([name: "upstream", url: url])
+                        logger.lifecycle("\n No current upstream set. Setting to ${url}")
+                    } else {
+                        logger.lifecycle("\n Could not find upstream url in addons.xml")
+                    }
+                } else {
+                    logger.lifecycle("\n moqui-runtime: Remote set to ${upstream.url}")
+                }
+            }
+        }
+
+        for (File compDir in file('runtime/component').listFiles().findAll { it.isDirectory() && it.listFiles().find { it.name == '.git' } }) {
+            def compName = file("runtime/component").toPath().relativize( file(compDir).toPath() ).toString()
+
+            def component = (Node) addons.component.find({ it."@name" == compName })
+            if (component != null) {
+
+                def curGrgit = Grgit.open(dir: compDir)
+                def upstream = curGrgit.remote.list().find({ it.name == "upstream" })
+                if (upstream == null ) {
+                    def url = getComponentUpstreamLocation("git", component, addons)
+                    logger.lifecycle("\n url: ${url}")
+                    if (url != null) {
+                        curGrgit.remote.add([name: "upstream", url: url])
+                        logger.lifecycle("\n No current upstream set. Setting to ${url}")
+                    } else {
+                        logger.lifecycle("\n Could not find upstream url in addons.xml")
+                    }
+                } else {
+                    logger.lifecycle("\n $compName: Remote set to ${upstream.url}")
+                }
             }
         }
     }
@@ -798,6 +865,21 @@ File downloadComponent(String targetDirPath, String type, Node component, Node a
     logger.lifecycle("Downloaded ${compName} to ${targetDirPath}")
     return targetDir
 }
+
+String getComponentUpstreamLocation(String type, Node component, Node addons) {
+    String compName = component.'@name'
+
+    String repositoryName = (component.'@repository' ?: addons.'@default-repository' ?: 'github')
+    Node repository = (Node) addons.repository.find({ it."@name" == repositoryName })
+    if (repository == null) throw new InvalidUserDataException("Repository ${repositoryName} not found in myaddons.xml or addons.xml")
+    Node location = (Node) repository.location.find({ it."@type" == type })
+    if (location == null) throw new InvalidUserDataException("Location for type ${type} now found in repository ${repositoryName}")
+
+    String url = Eval.me('component', component, '"""' + location.'@url' + '"""')
+    logger.lifecycle(" Getting ${compName} (type ${type}) from ${url} ")
+    return url
+}
+
 def checkComponentDependencies(String compName, String type, Node addons, Node myaddons, Set compsChecked) {
     File componentDir = file("runtime/component/${compName}")
     if (!componentDir.exists()) return
