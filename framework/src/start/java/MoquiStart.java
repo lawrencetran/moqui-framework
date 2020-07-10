@@ -39,7 +39,7 @@ import java.util.jar.Manifest;
 public class MoquiStart {
     // this default is for development and is here instead of having a buried properties file that might cause conflicts when trying to override
     private static final String defaultConf = "conf/MoquiDevConf.xml";
-    private static final String tempDirName = "execwartmp";
+    private static final String tempDirName = "/tmp/execwartmp";
 
     private final static boolean reportJarsUnused = Boolean.valueOf(System.getProperty("report.jars.unused", "false"));
     // private final static boolean reportJarsUnused = true;
@@ -227,11 +227,12 @@ public class MoquiStart {
             serverClass.getMethod("addConnector", connectorClass).invoke(server, httpConnector);
 
             // SessionDataStore
-            File storeDir = new File(runtimePath + "/sessions");
+            File storeDir = new File("/tmp/moqui/sessions");
             if (!storeDir.exists()) storeDir.mkdirs();
             System.out.println("Creating Jetty FileSessionDataStore with directory " + storeDir.getCanonicalPath());
 
             Object sessionHandler = sessionHandlerClass.getConstructor().newInstance();
+            System.out.println("Session Handler: " + sessionHandler.getClass());
             sessionHandlerClass.getMethod("setServer", serverClass).invoke(sessionHandler, server);
             Object sessionCache = defaultSessionCacheClass.getConstructor(sessionHandlerClass).newInstance(sessionHandler);
             Object sessionDataStore = fileSessionDataStoreClass.getConstructor().newInstance();

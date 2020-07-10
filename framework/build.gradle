@@ -67,6 +67,8 @@ tasks.withType(GroovyCompile) { options.compilerArgs << "-proc:none" }
 dependencies {
     compile project(':moqui-util')
 
+    runtime group: 'mysql', name: "mysql-connector-java", version: '8.0.20'
+
     // Groovy
     // NOTE: update attempt to 3.0.2 has issues with slow build (just slow stub generation? seems others are seeing that too)
     //     and updated Spock required (tried 2.0-M2-groovy-3.0, not final release and tests didn't work)

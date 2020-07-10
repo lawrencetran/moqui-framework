@@ -89,10 +89,12 @@ class UserFacadeImpl implements UserFacade {
     }
 
     void initFromHttpRequest(HttpServletRequest request, HttpServletResponse response) {
+
+        logger.info("initFromHttpRequest")
         this.request = request
         this.response = response
         this.session = request.getSession()
-
+        logger.info("Session is " + this.session.isNew() ? 'new': 'not new')
         // get client IP address, handle proxy original address if exists
         String forwardedFor = request.getHeader("X-Forwarded-For")
         if (forwardedFor != null && !forwardedFor.isEmpty()) { clientIpInternal = forwardedFor.split(",")[0].trim() }
@@ -100,6 +102,7 @@ class UserFacadeImpl implements UserFacade {
 
         String preUsername = getUsername()
         Subject webSubject = makeEmptySubject()
+        logger.info("Is Authenticated: " + webSubject.authenticated ? "yes" : "no")
         if (webSubject.authenticated) {
             String sesUsername = (String) webSubject.getPrincipal()
             if (preUsername != null && !preUsername.isEmpty()) {
@@ -138,7 +141,8 @@ class UserFacadeImpl implements UserFacade {
         }
 
         this.visitId = session.getAttribute("moqui.visitId")
-
+        logger.info("Visit Id: " + this.visitId)
+        logger.info("Visitor Id: " + session.getAttribute("moqui.visitorId"))
         // check for HTTP Basic Authorization for Authentication purposes
         // NOTE: do this even if there is another user logged in, will go on stack
         Map secureParameters = eci.webImpl != null ? eci.webImpl.getSecureRequestParameters() :
@@ -258,6 +262,9 @@ class UserFacadeImpl implements UserFacade {
                 }
             }
         }
+        logger.info("End of initFromHttpRequest")
+        logger.info("Visit Id: " + this.visitId)
+        logger.info("Visitor Id: " + session.getAttribute("moqui.visitorId"))
     }
     void initFromHandshakeRequest(HandshakeRequest request) {
         this.session = (HttpSession) request.getHttpSession()
