@@ -22,6 +22,7 @@ import org.moqui.etl.SimpleEtl
 import org.moqui.etl.SimpleEtl.StopException
 import org.moqui.impl.context.ArtifactExecutionFacadeImpl
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
+import org.moqui.impl.context.ContextJavaUtil
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.impl.context.TransactionCache
 import org.moqui.impl.context.TransactionFacadeImpl
@@ -60,8 +61,9 @@ abstract class EntityFindBase implements EntityFind {
     protected String singleCondField = (String) null
     protected Object singleCondValue = null
     protected Map<String, Object> simpleAndMap = (Map<String, Object>) null
-    protected EntityConditionImplBase whereEntityCondition = (EntityConditionImplBase) null
+    protected Boolean tempHasFullPk = (Boolean) null
 
+    protected EntityConditionImplBase whereEntityCondition = (EntityConditionImplBase) null
     protected EntityConditionImplBase havingEntityCondition = (EntityConditionImplBase) null
 
     protected ArrayList<String> fieldsToSelect = (ArrayList<String>) null
@@ -685,6 +687,19 @@ abstract class EntityFindBase implements EntityFind {
         if (errorMessage == null) errorMessage = baseMsg + " " + ed.getEntityName() + " by " + cond
         return errorMessage
     }
+
+    private void registerForUpdateLock(Map<String, Object> fieldValues) {
+        if (fieldValues == null || fieldValues.size() == 0) return
+        if (!forUpdate) return
+        final TransactionFacadeImpl tfi = efi.ecfi.transactionFacade
+        if (!tfi.getUseLockTrack()) return
+
+        EntityDefinition ed = getEntityDef()
+
+        ArrayList<ArtifactExecutionInfo> stackArray = efi.ecfi.getEci().artifactExecutionFacade.getStackArray()
+        tfi.registerRecordLock(new ContextJavaUtil.EntityRecordLock(ed.getFullEntityName(), ed.getPrimaryKeysString(fieldValues), stackArray))
+    }
+
     // ======================== Find and Abstract Methods ========================
 
     abstract EntityDynamicView makeEntityDynamicView()
@@ -863,9 +878,21 @@ abstract class EntityFindBase implements EntityFind {
                 if (forUpdate && !txCache.isKnownLocked(txcValue) && !txCache.isTxCreate(txcValue)) {
                     EntityValueBase fuDbValue
                     EntityConditionImplBase cond = isViewEntity ? getConditionForQuery(ed, whereCondition) : whereCondition
-                    try { fuDbValue = oneExtended(cond, fieldInfoArray, fieldOptionsArray) }
-                    catch (SQLException e) { throw new EntitySqlException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e) }
-                    catch (Exception e) { throw new EntityException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e) }
+
+                    // register lock before if we have a full pk, otherwise after
+                    if (hasFullPk && efi.ecfi.transactionFacade.getUseLockTrack())
+                        registerForUpdateLock(simpleAndMap != null ? simpleAndMap : [(singleCondField):singleCondValue])
+
+                    try {
+                        fuDbValue = oneExtended(cond, fieldInfoArray, fieldOptionsArray)
+                    } catch (SQLException e) {
+                        throw new EntitySqlException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e)
+                    } catch (Exception e) {
+                        throw new EntityException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e)
+                    }
+
+                    // register lock before if we have a full pk, otherwise after; this particular one doesn't make sense, shouldn't happen, so just in case
+                    if (!hasFullPk && efi.ecfi.transactionFacade.getUseLockTrack()) registerForUpdateLock(fuDbValue)
 
                     if (txCache.isReadOnly()) {
                         // is read only tx cache so use the value from the DB
@@ -906,9 +933,25 @@ abstract class EntityFindBase implements EntityFind {
             this.resultSetConcurrency = ResultSet.CONCUR_READ_ONLY
 
             EntityConditionImplBase cond = isViewEntity ? getConditionForQuery(ed, whereCondition) : whereCondition
-            try { newEntityValue = oneExtended(cond, fieldInfoArray, fieldOptionsArray) }
-            catch (SQLException e) { throw new EntitySqlException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e) }
-            catch (Exception e) { throw new EntityException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e) }
+
+            // register lock before if we have a full pk, otherwise after
+            if (forUpdate && hasFullPk && efi.ecfi.transactionFacade.getUseLockTrack())
+                registerForUpdateLock(simpleAndMap != null ? simpleAndMap : [(singleCondField):singleCondValue])
+
+            try {
+                tempHasFullPk = hasFullPk
+                newEntityValue = oneExtended(cond, fieldInfoArray, fieldOptionsArray)
+            } catch (SQLException e) {
+                throw new EntitySqlException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e)
+            } catch (Exception e) {
+                throw new EntityException(makeErrorMsg("Error finding one", ONE_ERROR, cond, ed, ec), e)
+            } finally {
+                tempHasFullPk = null
+            }
+
+            // register lock before if we have a full pk, otherwise after
+            if (forUpdate && !hasFullPk && efi.ecfi.transactionFacade.getUseLockTrack())
+                registerForUpdateLock(newEntityValue)
 
             // it didn't come from the txCache so put it there
             if (txCache != null) txCache.onePut(newEntityValue, forUpdate)
@@ -1117,6 +1160,15 @@ abstract class EntityFindBase implements EntityFind {
                 el = (EntityListImpl) eli.getPartialList(offset != null ? offset : 0, limit, true)
             } else {
                 el = (EntityListImpl) eli.getCompleteList(true)
+            }
+
+            // register lock after because we can't before, don't know which records will be returned
+            if (forUpdate && !isViewEntity && efi.ecfi.transactionFacade.getUseLockTrack()) {
+                int elSize = el.size()
+                for (int i = 0; i < elSize; i++) {
+                    EntityValue ev = (EntityValue) el.get(i)
+                    registerForUpdateLock(ev)
+                }
             }
 
             // don't put in tx cache if it is going in list cache
@@ -1377,7 +1429,7 @@ abstract class EntityFindBase implements EntityFind {
                                 FieldInfo[] fieldInfoArray, FieldOrderOptions[] fieldOptionsArray) throws SQLException
 
     @Override
-    long updateAll(Map<String, ?> fieldsToSet) {
+    long updateAll(Map<String, Object> fieldsToSet) {
         boolean enableAuthz = disableAuthz ? !efi.ecfi.getEci().artifactExecutionFacade.disableAuthz() : false
         try {
             return updateAllInternal(fieldsToSet)
@@ -1385,7 +1437,7 @@ abstract class EntityFindBase implements EntityFind {
             if (enableAuthz) efi.ecfi.getEci().artifactExecutionFacade.enableAuthz()
         }
     }
-    protected long updateAllInternal(Map<String, ?> fieldsToSet) {
+    protected long updateAllInternal(Map<String, Object> fieldsToSet) {
         // NOTE: this code isn't very efficient, but will do the trick and cause all EECAs to be fired
         // NOTE: consider expanding this to do a bulk update in the DB if there are no EECAs for the entity
 
@@ -1428,7 +1480,9 @@ abstract class EntityFindBase implements EntityFind {
         if (ed.entityInfo.createOnly) throw new EntityException("Entity ${ed.getFullEntityName()} is create-only (immutable), cannot be deleted.")
 
         // if there are no EECAs for the entity OR there is a TransactionCache in place just call ev.delete() on each
-        boolean useEvDelete = txCache != null || efi.hasEecaRules(ed.getFullEntityName())
+        // NOTE DEJ 20200716 always use EV delete, not all JDBC drivers support ResultSet.deleteRow()... like MySQL Connector/J 8.0.20
+        // boolean useEvDelete = txCache != null || efi.hasEecaRules(ed.getFullEntityName())
+        boolean useEvDelete = true
         this.useCache(false)
         long totalDeleted = 0
         if (useEvDelete) {

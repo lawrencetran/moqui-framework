@@ -55,6 +55,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         if (isGroupBy || (isDistinct && fiaLength > 0)) {
             sqlTopLevel.append("COUNT(*) FROM (SELECT ");
             if (isDistinct) sqlTopLevel.append("DISTINCT ");
+            // NOTE: regardless of DB configuration (database.@add-unique-as) it is always needed across various DBs in this case, including MySQL
             makeSqlSelectFields(fieldInfoArray, fieldOptionsArray, true);
             // NOTE: this will be closed by closeCountSubSelect()
         } else {
@@ -107,6 +108,11 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         localBuilder.append(" FROM ");
 
         EntityConditionImplBase outWhereCondition = localWhereCondition;
+
+        // TODO: bug in Groovy 3.0.10 that somehow flips the isViewEntity boolean; can remove this once resolved with a future version of Groovy
+        // if (localEntityDefinition.fullEntityName.contains("ArtifactTarpitCheckView") || localEntityDefinition.fullEntityName.contains("DataFeedDocumentDetail"))
+        //     logger.warn("===== TOREMOVE ===== localEntityDefinition " + localEntityDefinition.fullEntityName + " isViewEntity " + localEntityDefinition.isViewEntity + " " + localEntityDefinition);
+
         if (localEntityDefinition.isViewEntity) {
             final MNode entityNode = localEntityDefinition.getEntityNode();
             final MNode databaseNode = efi.getDatabaseNode(localEntityDefinition.getEntityGroupName());
@@ -392,9 +398,10 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         if (entityConditionList != null && entityConditionList.size() > 0) {
             // add any additional manual conditions for the member-entity view link here
             MNode entityCondition = entityConditionList.get(0);
-            EntityConditionImplBase linkEcib = localEntityDefinition.makeViewListCondition(entityCondition);
+            // logger.warn("======== appendJoinConditions() localEntityDefinition " + localEntityDefinition.fullEntityName + " linkEntityDefinition " + linkEntityDefinition.fullEntityName + " relatedLinkEntityDefinition " + relatedLinkEntityDefinition.fullEntityName);
+            EntityConditionImplBase linkEcib = localEntityDefinition.makeViewListCondition(entityCondition, relatedMemberEntityNode);
             if (keyMapsSize > 0) localBuilder.append(" AND ");
-            // TODO: is this correct? what does it append to? not localBuilder?
+            // TODO: does this need to use localBuilder? seems to be working so far...
             linkEcib.makeSqlWhere(this, null);
         }
     }
@@ -497,7 +504,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         ArrayList<MNode> viewEntityConditionList = localEntityDefinition.getEntityNode().children("entity-condition");
         if (viewEntityConditionList != null && viewEntityConditionList.size() > 0) {
             MNode entCondNode = viewEntityConditionList.get(0);
-            viewCondition = localEntityDefinition.makeViewListCondition(entCondNode);
+            viewCondition = localEntityDefinition.makeViewListCondition(entCondNode, null);
         }
 
         // additional fields to consider when trimming the member-entities to join
@@ -634,7 +641,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
             if (condition != null) localBuilder.append(" AND ");
         }
         if (condition != null) {
-            // TODO: does this need to use localBuilder?
+            // TODO: does this need to use localBuilder? seems to be working so far...
             condition.makeSqlWhere(this, localEntityDefinition);
         }
 

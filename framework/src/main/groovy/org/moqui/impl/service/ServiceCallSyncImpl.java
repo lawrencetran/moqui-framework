@@ -77,8 +77,6 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
                 try {
                     Map<String, Object> result = new HashMap<>();
                     for (int i = 0; ; i++) {
-                        if (("true".equals(parameters.get("_useRowSubmit")) || "true".equals(parameters.get("_useRowSubmit_" + i)))
-                                && !"true".equals(parameters.get("_rowSubmit_" + i))) continue;
                         Map<String, Object> currentParms = new HashMap<>();
                         for (int paramIndex = 0; paramIndex < inParameterNamesSize; paramIndex++) {
                             String ipn = inParameterNames.get(paramIndex);
@@ -88,6 +86,10 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
 
                         // if the map stayed empty we have no parms, so we're done
                         if (currentParms.size() == 0) break;
+
+                        if (("true".equals(parameters.get("_useRowSubmit")) || "true".equals(parameters.get("_useRowSubmit_" + i)))
+                                && !"true".equals(parameters.get("_rowSubmit_" + i))) continue;
+
                         // now that we have checked the per-row parameters, add in others available
                         for (int paramIndex = 0; paramIndex < inParameterNamesSize; paramIndex++) {
                             String ipn = inParameterNames.get(paramIndex);
@@ -150,15 +152,15 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
         if (traceEnabled) logger.trace("Calling service " + serviceName + " initial input: " + currentParameters);
 
         // get these before cleaning up the parameters otherwise will be removed
-        String userId = null;
+        String username = null;
         String password = null;
         if (currentParameters.containsKey("authUsername")) {
-            userId = (String) currentParameters.get("authUsername");
+            username = (String) currentParameters.get("authUsername");
             password = (String) currentParameters.get("authPassword");
         } else if (currentParameters.containsKey("authUserAccount")) {
             Map authUserAccount = (Map) currentParameters.get("authUserAccount");
-            userId = (String) authUserAccount.get("userId");
-            if (userId == null || userId.isEmpty()) userId = (String) currentParameters.get("authUsername");
+            username = (String) authUserAccount.get("username");
+            if (username == null || username.isEmpty()) username = (String) currentParameters.get("authUsername");
             password = (String) authUserAccount.get("currentPassword");
             if (password == null || password.isEmpty()) password = (String) currentParameters.get("authPassword");
         }
@@ -196,8 +198,8 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
         boolean userLoggedIn = false;
 
         // always try to login the user if parameters are specified
-        if (userId != null && password != null && userId.length() > 0 && password.length() > 0) {
-            userLoggedIn = eci.getUser().loginUser(userId, password);
+        if (username != null && password != null && username.length() > 0 && password.length() > 0) {
+            userLoggedIn = eci.getUser().loginUser(username, password);
             // if user was not logged in we should already have an error message in place so just return
             if (!userLoggedIn) return null;
         }
@@ -297,7 +299,8 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
             if (sd.noTxCache) {
                 tf.flushAndDisableTransactionCache();
             } else {
-                if (useTransactionCache != null ? useTransactionCache : sd.txUseCache) tf.initTransactionCache();
+                if (useTransactionCache != null ? useTransactionCache : sd.txUseCache) tf.initTransactionCache(false);
+                // alternative to use read only TX cache by default, not functional yet: tf.initTransactionCache(!(useTransactionCache != null ? useTransactionCache : sd.txUseCache));
             }
 
             try {
@@ -397,7 +400,7 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
             }
 
             try {
-                if (userLoggedIn) eci.getUser().logoutUser();
+                if (userLoggedIn) eci.userFacade.logoutLocal();
             } catch (Throwable t) {
                 logger.error("Error logging out user after call to service " + serviceName, t);
             }
@@ -573,7 +576,10 @@ public class ServiceCallSyncImpl extends ServiceCallImpl implements ServiceCallS
         try {
             if (pauseResumeIfNeeded && tf.isTransactionInPlace()) suspendedTransaction = tf.suspend();
             boolean beganTransaction = beginTransactionIfNeeded && tf.begin(null);
-            if (useTransactionCache != null && useTransactionCache) tf.initTransactionCache();
+
+            if (useTransactionCache != null && useTransactionCache) tf.initTransactionCache(false);
+            // alternative to use read only TX cache by default, not functional yet: tf.initTransactionCache(useTransactionCache == null || !useTransactionCache);
+
             try {
                 if (hasSecaRules) ServiceFacadeImpl.runSecaRules(serviceNameNoHash, currentParameters, null, "pre-service", secaRules, eci);
 

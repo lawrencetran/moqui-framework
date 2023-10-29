@@ -36,36 +36,27 @@ public class FieldInfo {
     protected final static boolean isTraceEnabled = logger.isTraceEnabled();
     public final static String[] aggFunctionArray = {"min", "max", "sum", "avg", "count", "count-distinct"};
     public final static Set<String> aggFunctions = new HashSet<>(Arrays.asList(aggFunctionArray));
+    public final static String decryptFailedMagicString = "_DECRYPT_FAILED_";
 
     public final EntityDefinition ed;
     public final MNode fieldNode;
-    public final String entityName;
-    public final String name;
-    public final String aliasFieldName;
+    public final int index;
+    public final String entityName, name, aliasFieldName;
     public final ConditionField conditionField;
-    public final String type;
-    public final String columnName;
+    public final String type, columnName;
     final String fullColumnNameInternal;
-    private final String expandColumnName;
-    public final String defaultStr;
-    public final String javaType;
-    final String enableAuditLog;
+    public final String expandColumnName, defaultStr, javaType, enableAuditLog;
     public final int typeValue;
-    private final boolean isTextVeryLong;
-    public final boolean isPk;
-    private final boolean encrypt;
-    final boolean isSimple;
-    final boolean enableLocalization;
-    final boolean createOnly;
-    final boolean isLastUpdatedStamp;
+    public final boolean isPk, isTextVeryLong, encrypt, isSimple, enableLocalization, createOnly, isLastUpdatedStamp;
     public final MNode memberEntityNode;
     public final MNode directMemberEntityNode;
     public final boolean hasAggregateFunction;
     final Set<String> entityAliasUsedSet = new HashSet<>();
 
-    public FieldInfo(EntityDefinition ed, MNode fieldNode) {
+    public FieldInfo(EntityDefinition ed, MNode fieldNode, int index) {
         this.ed = ed;
         this.fieldNode = fieldNode;
+        this.index = index;
         entityName = ed.getFullEntityName();
 
         Map<String, String> fnAttrs = fieldNode.getAttributes();
@@ -74,8 +65,27 @@ public class FieldInfo {
         // NOTE: intern a must here for use with LiteStringMap, without this all sorts of bad behavior, not finding any fields sort of thing
         name = nameAttr.intern();
         conditionField = new ConditionField(this);
+        // column name from attribute or underscored name, may have override per DB
         String columnNameAttr = fnAttrs.get("column-name");
-        columnName = columnNameAttr != null && columnNameAttr.length() > 0 ? columnNameAttr : EntityJavaUtil.camelCaseToUnderscored(name);
+        String colNameToUse = columnNameAttr != null && columnNameAttr.length() > 0 ? columnNameAttr :
+                EntityJavaUtil.camelCaseToUnderscored(name);
+        // column name: see if there is a name-replace
+        String groupName = ed.getEntityGroupName();
+        MNode databaseNode = ed.efi.getDatabaseNode(groupName);
+        // some datasources do not have a database node, like the Elastic Entity one
+        if (databaseNode != null) {
+            ArrayList<MNode> nameReplaceNodes = databaseNode.children("name-replace");
+            for (int i = 0; i < nameReplaceNodes.size(); i++) {
+                MNode nameReplaceNode = nameReplaceNodes.get(i);
+                if (colNameToUse.equalsIgnoreCase(nameReplaceNode.attribute("original"))) {
+                    String replaceName = nameReplaceNode.attribute("replace");
+                    logger.info("Replacing column name " + colNameToUse + " with replace name " + replaceName + " for entity " + entityName);
+                    colNameToUse = replaceName;
+                }
+            }
+        }
+        columnName = colNameToUse;
+
         defaultStr = fnAttrs.get("default");
 
         String typeAttr = fnAttrs.get("type");
@@ -151,6 +161,7 @@ public class FieldInfo {
         }
     }
 
+    /** Full column name for complex finds on view entities; plain entity column names are never expanded */
     public String getFullColumnName() {
         if (fullColumnNameInternal != null) return fullColumnNameInternal;
         return ed.efi.ecfi.resourceFacade.expand(expandColumnName, "", null, false);
@@ -395,10 +406,15 @@ public class FieldInfo {
                 value = EntityJavaUtil.enDeCrypt(original, false, efi);
             } catch (Exception e) {
                 logger.error("Error decrypting field [" + name + "] of entity [" + entityName + "]", e);
+                // NOTE DEJ 20200310 instead of using encrypted value return very clear fake placeholder; this is a bad design
+                //     because it uses a magic value that can't change as other code may use it; an alternative might be to have
+                //     the EntityValue internally handle it with a Set of fields that failed to decrypt, but this doesn't carry
+                //     through to or from web and other clients
+                value = decryptFailedMagicString;
             }
         }
 
-        valueMap.putByIString(name, value);
+        valueMap.putByIString(this.name, value, this.index);
     }
 
     private static final boolean checkPreparedStatementValueType = false;
@@ -429,6 +445,9 @@ public class FieldInfo {
             if (encrypt) {
                 if (localTypeValue != 1) throw new EntityException("The encrypt attribute was set to true on non-String field " + name + " of entity " + entityName);
                 String original = value.toString();
+                if (decryptFailedMagicString.equals(original)) {
+                    throw new EntityException("To prevent data loss, not allowing decrypt failed placeholder for field " + name + " of entity " + entityName);
+                }
                 value = EntityJavaUtil.enDeCrypt(original, true, efi);
             }
         }
@@ -437,6 +456,12 @@ public class FieldInfo {
         if (localTypeValue == 11 || localTypeValue == 12) {
             useBinaryTypeForBlob = ("true".equals(efi.getDatabaseNode(ed.getEntityGroupName()).attribute("use-binary-type-for-blob")));
         }
+        // if a count function used set as Long (type 6)
+        if (ed.isViewEntity) {
+            String function = fieldNode.attribute("function");
+            if (function != null && function.startsWith("count")) localTypeValue = 6;
+        }
+
         try {
             setPreparedStatementValue(ps, index, value, localTypeValue, useBinaryTypeForBlob, efi);
         } catch (EntityException e) {
@@ -556,10 +581,20 @@ public class FieldInfo {
                         ps.setBytes(index, valueBb.array());
                     } else if (value instanceof Blob) {
                         Blob valueBlob = (Blob) value;
-                        // calling setBytes instead of setBlob
+                        // calling setBytes instead of setBlob - old github.com/moqui/moqui repo issue #28 with Postgres JDBC driver
                         // ps.setBlob(index, (Blob) value)
                         // Blob blb = value
-                        ps.setBytes(index, valueBlob.getBytes(1, (int) valueBlob.length()));
+                        try {
+                            ps.setBytes(index, valueBlob.getBytes(1, (int) valueBlob.length()));
+                        } catch (Exception bytesExc) {
+                            // try ps.setBlob for larger byte arrays that H2 throws an exception for
+                            try {
+                                ps.setBlob(index, valueBlob);
+                            } catch (Exception blobExc) {
+                                // throw the original exception from setBytes()
+                                throw bytesExc;
+                            }
+                        }
                     } else {
                         if (value != null) {
                             throw new EntityException("Type not supported for BLOB field: " + value.getClass().getName() + ", for field " + entityName + "." + name);

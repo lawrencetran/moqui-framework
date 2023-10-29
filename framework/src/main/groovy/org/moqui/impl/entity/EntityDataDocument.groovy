@@ -28,6 +28,7 @@ import org.moqui.impl.entity.condition.FieldValueCondition
 import org.moqui.util.CollectionUtilities
 import org.moqui.util.LiteStringMap
 import org.moqui.util.MNode
+import org.moqui.util.ObjectUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -181,22 +182,20 @@ class EntityDataDocument {
 
             entityDef = dynamicView.makeEntityDefinition()
         }
-
         String makeDocId(EntityValue ev) {
             if (primaryPkFieldNamesSize == 1) {
                 // optimization for common simple case
                 String pkFieldName = (String) primaryPkFieldNames.get(0)
                 Object pkFieldValue = ev.getNoCheckSimple(pkFieldName)
-                return pkFieldValue.toString()
+                return ObjectUtilities.toPlainString(pkFieldValue)
             } else {
-                StringBuffer pkCombinedSb = new StringBuffer()
+                StringBuilder pkCombinedSb = new StringBuilder()
                 for (int pki = 0; pki < primaryPkFieldNamesSize; pki++) {
                     String pkFieldName = (String) primaryPkFieldNames.get(pki)
-                    if (!fieldAliasPathMap.containsKey(pkFieldName)) continue
+                    // don't do this, always use full PK even if not all aliased in doc, probably a bad DataDocument definition: if (!fieldAliasPathMap.containsKey(pkFieldName)) continue
                     if (pkCombinedSb.length() > 0) pkCombinedSb.append("::")
                     Object pkFieldValue = ev.getNoCheckSimple(pkFieldName)
-                    if (pkFieldValue instanceof Timestamp) pkFieldValue = ((Timestamp) pkFieldValue).getTime()
-                    pkCombinedSb.append(pkFieldValue.toString())
+                    pkCombinedSb.append(ObjectUtilities.toPlainString(pkFieldValue))
                 }
                 return pkCombinedSb.toString()
             }
@@ -400,15 +399,16 @@ class EntityDataDocument {
           - nested List of Maps for each related entity with aliased fields with relationship name as key
          */
         String docId = ddi.makeDocId(ev)
+        // logger.warn("DataDoc record PKs string: " + docId)
         Map<String, Object> docMap = ddi.hasAllPrimaryPks ? ((Map<String, Object>) documentMapMap.get(docId)) : (Map<String, Object>) null
         if (docMap == null) {
             // add special entries
             docMap = new LiteStringMap<Object>()
             docMap.put("_type", ddi.dataDocumentId)
-            if (docId) docMap.put("_id", docId)
+            if (docId != null && !docId.isEmpty()) docMap.put("_id", docId)
             docMap.put('_timestamp', docTsString)
             String _index = ddi.dataDocument.indexName
-            if (_index) docMap.put('_index', _index.toLowerCase())
+            if (_index != null && !_index.isEmpty()) docMap.put('_index', _index.toLowerCase())
             docMap.put('_entity', ddi.primaryEd.getShortOrFullEntityName())
 
             // add Map for primary entity

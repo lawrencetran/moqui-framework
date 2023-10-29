@@ -17,6 +17,7 @@ import groovy.transform.CompileStatic
 import org.moqui.BaseArtifactException
 import org.moqui.BaseException
 import org.moqui.context.ArtifactExecutionInfo
+import org.moqui.context.ArtifactExecutionInfo.AuthzAction
 import org.moqui.context.ExecutionContext
 import org.moqui.resource.ResourceReference
 import org.moqui.entity.EntityList
@@ -249,6 +250,9 @@ class ScreenUrlInfo {
     }
 
     boolean isPermitted(ExecutionContext ec, TransitionItem transitionItem) {
+        return isPermitted(ec, transitionItem, ArtifactExecutionInfo.AUTHZA_VIEW)
+    }
+    boolean isPermitted(ExecutionContext ec, TransitionItem transitionItem, AuthzAction actionEnum) {
         ArtifactExecutionFacadeImpl aefi = (ArtifactExecutionFacadeImpl) ec.getArtifactExecution()
         String userId = ec.getUser().getUserId()
 
@@ -264,13 +268,17 @@ class ScreenUrlInfo {
             // logger.warn("======== Not caching isPermitted, username=${username}, fullPathNameList=${fullPathNameList}")
         }
 
-        LinkedList<ArtifactExecutionInfoImpl> artifactExecutionInfoStack = new LinkedList<ArtifactExecutionInfoImpl>()
+        ArrayDeque<ArtifactExecutionInfoImpl> artifactExecutionInfoStack = new ArrayDeque<ArtifactExecutionInfoImpl>()
 
         int screenPathDefListSize = screenPathDefList.size()
+        boolean allowedByScreenDefinitionView = false
+        boolean allowedByScreenDefinitionAll = false
+        boolean allowedByScreenDefinition = false
         for (int i = 0; i < screenPathDefListSize; i++) {
+            AuthzAction curActionEnum = (i == (screenPathDefListSize - 1)) ? actionEnum : ArtifactExecutionInfo.AUTHZA_VIEW
             ScreenDefinition screenDef = (ScreenDefinition) screenPathDefList.get(i)
             ArtifactExecutionInfoImpl aeii = new ArtifactExecutionInfoImpl(screenDef.getLocation(),
-                    ArtifactExecutionInfo.AT_XML_SCREEN, ArtifactExecutionInfo.AUTHZA_VIEW, null)
+                    ArtifactExecutionInfo.AT_XML_SCREEN, curActionEnum, null)
 
             ArtifactExecutionInfoImpl lastAeii = (ArtifactExecutionInfoImpl) artifactExecutionInfoStack.peekFirst()
 
@@ -280,14 +288,33 @@ class ScreenUrlInfo {
             MNode screenNode = screenDef.getScreenNode()
 
             String requireAuthentication = screenNode.attribute('require-authentication')
+            allowedByScreenDefinitionView = "anonymous-view".equals(requireAuthentication)
+            allowedByScreenDefinitionAll = "anonymous-all".equals(requireAuthentication)
+            if (actionEnum == ArtifactExecutionInfo.AUTHZA_VIEW) {
+                allowedByScreenDefinition = allowedByScreenDefinition || allowedByScreenDefinitionView || allowedByScreenDefinitionAll
+            } else if (actionEnum == ArtifactExecutionInfo.AUTHZA_ALL)
+                allowedByScreenDefinition = allowedByScreenDefinition || allowedByScreenDefinitionAll
             if (!aefi.isPermitted(aeii, lastAeii,
                     isLast ? (!requireAuthentication || "true".equals(requireAuthentication)) : false, false, false, artifactExecutionInfoStack)) {
-                // logger.warn("TOREMOVE user ${username} is NOT allowed to view screen at path ${this.fullPathNameList} because of screen at ${screenDef.location}")
+                //logger.warn("TOREMOVE user ${userId} is NOT allowed to view screen at path ${this.fullPathNameList} because of screen at ${screenDef.location}")
                 if (permittedCacheKey != null) aefi.screenPermittedCache.put(permittedCacheKey, false)
                 return false
             }
 
             artifactExecutionInfoStack.addFirst(aeii)
+        }
+
+        // see if the transition is permitted
+        if (!allowedByScreenDefinition && transitionItem != null) {
+            ScreenDefinition lastScreenDef = (ScreenDefinition) screenPathDefList.get(screenPathDefList.size() - 1)
+            ArtifactExecutionInfoImpl aeii = new ArtifactExecutionInfoImpl("${lastScreenDef.location}/${transitionItem.name}",
+                    ArtifactExecutionInfo.AT_XML_SCREEN_TRANS, ArtifactExecutionInfo.AUTHZA_VIEW, null)
+            ArtifactExecutionInfoImpl lastAeii = (ArtifactExecutionInfoImpl) artifactExecutionInfoStack.peekFirst()
+            if (!aefi.isPermitted(aeii, lastAeii, true, false, false, artifactExecutionInfoStack)) {
+                // logger.warn("TOREMOVE user ${username} is NOT allowed to view screen at path ${this.fullPathNameList} because of screen at ${screenDef.location}")
+                if (permittedCacheKey != null) aefi.screenPermittedCache.put(permittedCacheKey, false)
+                return false
+            }
         }
 
         // if there is a transition with a single service go a little further and see if we have permission to call it
@@ -299,10 +326,16 @@ class ScreenUrlInfo {
             if (authzAction == null) authzAction = ServiceDefinition.verbAuthzActionEnumMap.get(ServiceDefinition.getVerbFromName(serviceName))
             if (authzAction == null) authzAction = ArtifactExecutionInfo.AUTHZA_ALL
 
+            boolean allowedByServiceDefinition = false
+            if (authzAction == ArtifactExecutionInfo.AUTHZA_VIEW) {
+                allowedByServiceDefinition = allowedByScreenDefinitionView || (sd != null && ("anonymous-view".equals(sd.authenticate) || "anonymous-all".equals(sd.authenticate)))
+            } else if (authzAction in [ArtifactExecutionInfo.AUTHZA_ALL, ArtifactExecutionInfo.AUTHZA_CREATE, ArtifactExecutionInfo.AUTHZA_UPDATE, ArtifactExecutionInfo.AUTHZA_DELETE]) {
+                allowedByServiceDefinition = allowedByScreenDefinitionAll || (sd != null && "anonymous-all".equals(sd.authenticate))
+            }
             ArtifactExecutionInfoImpl aeii = new ArtifactExecutionInfoImpl(serviceName, ArtifactExecutionInfo.AT_SERVICE, authzAction, null)
 
             ArtifactExecutionInfoImpl lastAeii = (ArtifactExecutionInfoImpl) artifactExecutionInfoStack.peekFirst()
-            if (!aefi.isPermitted(aeii, lastAeii, true, false, false, null)) {
+            if (!aefi.isPermitted(aeii, lastAeii, !allowedByServiceDefinition, false, false, null)) {
                 // logger.warn("TOREMOVE user ${username} is NOT allowed to run transition at path ${this.fullPathNameList} because of screen at ${screenDef.location}")
                 if (permittedCacheKey != null) aefi.screenPermittedCache.put(permittedCacheKey, false)
                 return false
@@ -437,7 +470,7 @@ class ScreenUrlInfo {
         requireEncryption = !"false".equals(rootSd?.webSettingsNode?.attribute("require-encryption"))
         if ("true".equals(rootSd?.screenNode?.attribute('begin-transaction'))) beginTransaction = true
         String txTimeoutAttr = rootSd?.screenNode?.attribute("transaction-timeout")
-        if (txTimeoutAttr) transactionTimeout = Integer.getInteger(txTimeoutAttr)
+        if (txTimeoutAttr) transactionTimeout = Integer.parseInt(txTimeoutAttr)
 
         // start the render lists with the root SD
         screenRenderDefList.add(rootSd)
@@ -592,7 +625,7 @@ class ScreenUrlInfo {
             if (curSd.screenNode?.attribute('begin-transaction') == "true") this.beginTransaction = true
             String curTxTimeoutAttr = curSd.screenNode?.attribute("transaction-timeout")
             if (curTxTimeoutAttr) {
-                Integer curTransactionTimeout = Integer.getInteger(txTimeoutAttr)
+                Integer curTransactionTimeout = Integer.parseInt(curTxTimeoutAttr)
                 if (transactionTimeout == null || curTransactionTimeout > transactionTimeout)
                     transactionTimeout = curTransactionTimeout
             }
@@ -693,7 +726,7 @@ class ScreenUrlInfo {
             if (curSd.screenNode?.attribute('begin-transaction') == "true") this.beginTransaction = true
             String curTxTimeoutAttr = curSd.screenNode?.attribute("transaction-timeout")
             if (curTxTimeoutAttr) {
-                Integer curTransactionTimeout = Integer.getInteger(txTimeoutAttr)
+                Integer curTransactionTimeout = Integer.parseInt(curTxTimeoutAttr)
                 if (transactionTimeout == null || curTransactionTimeout > transactionTimeout)
                     transactionTimeout = curTransactionTimeout
             }
@@ -1157,6 +1190,22 @@ class ScreenUrlInfo {
             if (fromMap.containsKey("pageNoLimit")) toMap.put("pageNoLimit", (String) fromMap.get("pageNoLimit"))
             if (fromMap.containsKey("lastStandalone")) toMap.put("lastStandalone", (String) fromMap.get("lastStandalone"))
             if (fromMap.containsKey("renderMode")) toMap.put("renderMode", (String) fromMap.get("renderMode"))
+        }
+        Map<String, String> getPassThroughParameterMap() {
+            Map<String, String> paramMap = new HashMap<>(getParameterMap())
+            paramMap.remove("moquiFormName")
+            paramMap.remove("moquiSessionToken")
+            paramMap.remove("lastStandalone")
+            paramMap.remove("formListFindId")
+            paramMap.remove("moquiRequestStartTime")
+            paramMap.remove("webrootTT")
+            logger.warn("pass through params for ${getUrl()}: ${paramMap}")
+            return paramMap
+        }
+        UrlInstance addPassThroughParameters(UrlInstance sourceUrlInstance) {
+            if (sourceUrlInstance == null) return null
+            addParameters(sourceUrlInstance.getPassThroughParameterMap())
+            return this
         }
 
         UrlInstance cloneUrlInstance() {
